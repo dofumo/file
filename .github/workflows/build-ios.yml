@@ -16,12 +16,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare original extension script for WKWebView
+      - name: Prepare and harden the original extension script
+        shell: bash
         run: |
+          set -euo pipefail
           python3 ios-tweak/scripts/prepare_content.py
-          python3 ios-tweak/scripts/embed_resources.py
+          python3 ios-tweak/scripts/apply_stability_patch.py
+          python3 ios-tweak/scripts/patch_native_router.py
+          python3 -m py_compile ios-tweak/scripts/prepare_content.py
+          python3 -m py_compile ios-tweak/scripts/apply_stability_patch.py
+          python3 -m py_compile ios-tweak/scripts/patch_native_router.py
+          python3 -m py_compile ios-tweak/tests/test_patch_scripts.py
+          python3 ios-tweak/tests/test_patch_scripts.py
+          node --check ios-tweak/scripts/scan_pipeline_core.js
           node --check ios-tweak/Resources/quiz-tutor-shim.js
           node --check ios-tweak/Resources/content.js
+          node ios-tweak/tests/scan_pipeline.test.js
 
       - name: Clone Theos and prepare SDK directories
         run: |
@@ -31,7 +41,6 @@ jobs:
       - name: Install Theos and iOS SDKs
         uses: Randomblock1/theos-action@v1
         with:
-          # Must be absolute: the action changes directories while downloading SDKs.
           theos-dir: ${{ github.workspace }}/theos
           theos-src: https://github.com/theos/theos
           theos-sdks: https://github.com/theos/sdks
@@ -50,7 +59,6 @@ jobs:
           packages=(ios-tweak/packages/*.deb)
           test "${#packages[@]}" -gt 0
           cp "${packages[0]}" out/
-
           extract_dir="$RUNNER_TEMP/qt-package"
           mkdir -p "$extract_dir"
           dpkg-deb -x "${packages[0]}" "$extract_dir"
@@ -61,7 +69,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: QuizTutorAI-iOS-rootless
+          name: QuizTutorAI-iOS-rootless-v2.4
           path: out/*
           if-no-files-found: error
           retention-days: 14
