@@ -1,7 +1,12 @@
-Port target: Azota iOS app bundle ID azt.azt
-Web engine: WKWebView
-License: omitted for this personal iOS target
-Gemini API key: required; stored in iOS Keychain, with only a non-secret marker in IndexedDB
-Native settings: color picker, opacity sliders, floating button size, explanation panel height, model/language, API key
-Screenshot capture: intentionally unsupported; DOM image fetch only
-Packaging: standalone AzotaQuizTutor.dylib; content.js and quiz-tutor-shim.js are embedded at build time
+Quiz Tutor AI personal iOS port, version 2.3.0
+
+- Target: Azota iOS app bundle ID azt.azt; WKWebView main-frame pages on azota.vn.
+- Rootless Theos tweak, ARM64, iOS 15+.
+- Single standalone AzotaQuizTutor.dylib; JS assets embedded at build time, no external bundle.
+- Extension activation/license key system is omitted. Gemini API key is still required and stored in iOS Keychain.
+- One primary Gemini API key plus two optional backup keys are supported.
+- Optional fallback model is used for model overload/high-demand responses; backup keys are rotated for quota/invalid-key responses.
+- First-pass answers are delivered per question request (groups of 2 only for pages above 24 detected questions), with at most 2 concurrent requests; this is not token-by-token streaming.
+- The floating Q button shows the visible answer count while scanning and pulses with a refresh glyph during active refinement; native Settings includes live style preview.
+- Native Settings: Gemini/model configuration, colors, opacity, FAB size, explanation panel height.
+- Browser screenshot capture and Python Code Execution are intentionally not included.

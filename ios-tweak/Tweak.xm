@@ -41,12 +41,17 @@ static BOOL QTIsTargetApp(void) {
     return [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:kQTTargetBundle];
 }
 
-// Keep the Gemini API key in the iOS Keychain, not in the Azota website's IndexedDB.
-static NSString *QTReadAPIKey(void) {
+// Keep all Gemini API keys in the iOS Keychain, never in website IndexedDB.
+static NSString *QTKeychainAccountForIndex(NSInteger index) {
+    if (index <= 0) return @"api-key";
+    return [NSString stringWithFormat:@"api-key-backup-%ld", (long)index];
+}
+
+static NSString *QTReadAPIKeyAtIndex(NSInteger index) {
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: @"com.dofumo.quiztutor.gemini",
-        (__bridge id)kSecAttrAccount: @"api-key",
+        (__bridge id)kSecAttrAccount: QTKeychainAccountForIndex(index),
         (__bridge id)kSecReturnData: @YES,
         (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
     };
@@ -57,11 +62,11 @@ static NSString *QTReadAPIKey(void) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
 }
 
-static void QTSaveAPIKey(NSString *apiKey) {
+static void QTSaveAPIKeyAtIndex(NSInteger index, NSString *apiKey) {
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: @"com.dofumo.quiztutor.gemini",
-        (__bridge id)kSecAttrAccount: @"api-key"
+        (__bridge id)kSecAttrAccount: QTKeychainAccountForIndex(index)
     };
     SecItemDelete((__bridge CFDictionaryRef)query);
     if (![apiKey isKindOfClass:[NSString class]] || !apiKey.length) return;
@@ -69,6 +74,21 @@ static void QTSaveAPIKey(NSString *apiKey) {
     item[(__bridge id)kSecValueData] = [apiKey dataUsingEncoding:NSUTF8StringEncoding];
     item[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
     SecItemAdd((__bridge CFDictionaryRef)item, NULL);
+}
+
+static NSArray<NSString *> *QTReadAPIKeys(void) {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    for (NSInteger index = 0; index <= 2; index++) {
+        NSString *key = [QTReadAPIKeyAtIndex(index) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (key.length && ![keys containsObject:key]) [keys addObject:key];
+    }
+    return keys;
+}
+
+static void QTNotifyStatus(WKWebView *webView, id requestID, NSString *message) {
+    if (!webView || !requestID || !message.length) return;
+    NSString *script = [NSString stringWithFormat:@"window.__qtNativeStatus(%@,%@);", QTJSONString(requestID), QTJSONString(message)];
+    dispatch_async(dispatch_get_main_queue(), ^{ [webView evaluateJavaScript:script completionHandler:nil]; });
 }
 
 static void QTReply(WKWebView *webView, id requestID, NSDictionary *payload) {
@@ -191,7 +211,23 @@ static NSString *QTHexFromColor(UIColor *color) {
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UILabel *> *sliderValues;
 @property (nonatomic, strong) UITextField *apiKeyField;
 @property (nonatomic, strong) UITextField *modelField;
+@property (nonatomic, strong) UITextField *fallbackModelField;
+@property (nonatomic, strong) UITextField *backupKey1Field;
+@property (nonatomic, strong) UITextField *backupKey2Field;
 @property (nonatomic, strong) UITextField *languageField;
+@property (nonatomic, strong) UIView *previewArea;
+@property (nonatomic, strong) UIButton *previewFab;
+@property (nonatomic, strong) UILabel *previewBadge;
+@property (nonatomic, strong) UILabel *previewLowBadge;
+@property (nonatomic, strong) UIView *previewPanel;
+@property (nonatomic, strong) UILabel *previewPanelTitle;
+@property (nonatomic, strong) UILabel *previewPanelBody;
+@property (nonatomic, strong) UILabel *previewToast;
+@property (nonatomic, strong) NSLayoutConstraint *previewFabWidth;
+@property (nonatomic, strong) NSLayoutConstraint *previewFabHeight;
+@property (nonatomic, strong) NSLayoutConstraint *previewPanelHeight;
+@property (nonatomic) BOOL hasSavedBackupKey1;
+@property (nonatomic) BOOL hasSavedBackupKey2;
 @property (nonatomic, copy) NSString *activeColorKey;
 @property (nonatomic, strong) UIStackView *formStack;
 @property (nonatomic) BOOL hasSavedKey;
@@ -210,7 +246,9 @@ static NSString *QTHexFromColor(UIColor *color) {
         _colorButtons = [NSMutableDictionary dictionary];
         _sliders = [NSMutableDictionary dictionary];
         _sliderValues = [NSMutableDictionary dictionary];
-        _hasSavedKey = QTReadAPIKey().length > 0;
+        _hasSavedKey = QTReadAPIKeyAtIndex(0).length > 0;
+        _hasSavedBackupKey1 = QTReadAPIKeyAtIndex(1).length > 0;
+        _hasSavedBackupKey2 = QTReadAPIKeyAtIndex(2).length > 0;
     }
     return self;
 }
@@ -266,9 +304,21 @@ static NSString *QTHexFromColor(UIColor *color) {
     subtitle.numberOfLines = 0;
     [self.formStack addArrangedSubview:subtitle];
 
-    [self addSection:@"Gemini"];
-    self.apiKeyField = [self addLabeledTextField:@"Gemini API key" placeholder:(self.hasSavedKey ? @"Đã lưu trong Keychain — nhập mới để thay thế" : @"Dán Gemini API key") secure:YES value:@""];
-    self.modelField = [self addLabeledTextField:@"Model" placeholder:@"gemini-3.5-flash-lite" secure:NO value:[self stringValue:@"model" fallback:@"gemini-3.5-flash-lite"]];
+    [self addSection:@"Xem trước giao diện"];
+    [self addPreview];
+
+    [self addSection:@"Gemini & dự phòng"];
+    self.apiKeyField = [self addLabeledTextField:@"API key chính" placeholder:(self.hasSavedKey ? @"Đã lưu trong Keychain — nhập mới để thay thế" : @"Dán Gemini API key chính") secure:YES value:@""];
+    self.backupKey1Field = [self addLabeledTextField:@"API key dự phòng 1" placeholder:(self.hasSavedBackupKey1 ? @"Đã lưu backup key 1 — nhập mới để thay thế" : @"Dán API key dự phòng 1 (không bắt buộc)") secure:YES value:@""];
+    self.backupKey2Field = [self addLabeledTextField:@"API key dự phòng 2" placeholder:(self.hasSavedBackupKey2 ? @"Đã lưu backup key 2 — nhập mới để thay thế" : @"Dán API key dự phòng 2 (không bắt buộc)") secure:YES value:@""];
+    self.modelField = [self addLabeledTextField:@"Model chính" placeholder:@"Model Gemini đang dùng" secure:NO value:[self stringValue:@"model" fallback:@"gemini-3.5-flash-lite"]];
+    self.fallbackModelField = [self addLabeledTextField:@"Model dự phòng khi quá tải" placeholder:@"Để trống để tắt model dự phòng" secure:NO value:[self stringValue:@"fallbackModel" fallback:@""]];
+    UILabel *fallbackNote = [UILabel new];
+    fallbackNote.text = @"Quota / 429: thử API key tiếp theo. Model quá tải / 503 / high demand: chuyển sang model dự phòng. Backup key chỉ có ích khi có quyền và hạn mức độc lập; key cùng project có thể dùng chung quota.";
+    fallbackNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    fallbackNote.textColor = UIColor.secondaryLabelColor;
+    fallbackNote.numberOfLines = 0;
+    [self.formStack addArrangedSubview:fallbackNote];
     self.languageField = [self addLabeledTextField:@"Ngôn ngữ giải thích" placeholder:@"Tiếng Việt" secure:NO value:[self stringValue:@"language" fallback:@"Tiếng Việt"]];
 
     [self addSection:@"Nút nổi"];
@@ -307,7 +357,7 @@ static NSString *QTHexFromColor(UIColor *color) {
     [self.formStack addArrangedSubview:reset];
 
     UIButton *clearKey = [UIButton buttonWithType:UIButtonTypeSystem];
-    [clearKey setTitle:@"Xóa Gemini API key đã lưu" forState:UIControlStateNormal];
+    [clearKey setTitle:@"Xóa toàn bộ API key đã lưu" forState:UIControlStateNormal];
     [clearKey setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
     [clearKey addTarget:self action:@selector(clearAPIKey) forControlEvents:UIControlEventTouchUpInside];
     [self.formStack addArrangedSubview:clearKey];
@@ -321,6 +371,140 @@ static NSString *QTHexFromColor(UIColor *color) {
     save.contentEdgeInsets = UIEdgeInsetsMake(14, 18, 14, 18);
     [save addTarget:self action:@selector(saveSettings) forControlEvents:UIControlEventTouchUpInside];
     [self.formStack addArrangedSubview:save];
+}
+
+- (void)addPreview {
+    UIView *area = [UIView new];
+    area.translatesAutoresizingMaskIntoConstraints = NO;
+    area.backgroundColor = UIColor.tertiarySystemGroupedBackgroundColor;
+    area.layer.cornerRadius = 14;
+    area.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+    area.layer.borderColor = UIColor.separatorColor.CGColor;
+    [self.formStack addArrangedSubview:area];
+    [area.heightAnchor constraintEqualToConstant:224].active = YES;
+    self.previewArea = area;
+
+    UIView *panel = [UIView new];
+    panel.translatesAutoresizingMaskIntoConstraints = NO;
+    panel.layer.cornerRadius = 10;
+    panel.layer.borderWidth = 1;
+    panel.layer.masksToBounds = YES;
+    [area addSubview:panel];
+    self.previewPanel = panel;
+
+    UILabel *panelTitle = [UILabel new];
+    panelTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    panelTitle.font = [UIFont boldSystemFontOfSize:14];
+    panelTitle.text = @"Đáp án: B";
+    [panel addSubview:panelTitle];
+    self.previewPanelTitle = panelTitle;
+
+    UILabel *panelBody = [UILabel new];
+    panelBody.translatesAutoresizingMaskIntoConstraints = NO;
+    panelBody.font = [UIFont systemFontOfSize:12];
+    panelBody.numberOfLines = 3;
+    panelBody.text = @"Hướng dẫn giải\nĐây là phần xem trước cách bảng giải thích hiển thị trên trang.";
+    [panel addSubview:panelBody];
+    self.previewPanelBody = panelBody;
+
+    UILabel *badge = [UILabel new];
+    badge.translatesAutoresizingMaskIntoConstraints = NO;
+    badge.text = @"B";
+    badge.textAlignment = NSTextAlignmentCenter;
+    badge.font = [UIFont boldSystemFontOfSize:13];
+    badge.layer.cornerRadius = 6;
+    badge.layer.masksToBounds = YES;
+    [area addSubview:badge];
+    self.previewBadge = badge;
+
+    UILabel *lowBadge = [UILabel new];
+    lowBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    lowBadge.text = @"?";
+    lowBadge.textAlignment = NSTextAlignmentCenter;
+    lowBadge.font = [UIFont boldSystemFontOfSize:13];
+    lowBadge.layer.cornerRadius = 6;
+    lowBadge.layer.masksToBounds = YES;
+    [area addSubview:lowBadge];
+    self.previewLowBadge = lowBadge;
+
+    UILabel *toast = [UILabel new];
+    toast.translatesAutoresizingMaskIntoConstraints = NO;
+    toast.text = @"Đã giải 4 câu · đang kiểm tra lại…";
+    toast.textAlignment = NSTextAlignmentCenter;
+    toast.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    toast.layer.cornerRadius = 7;
+    toast.layer.masksToBounds = YES;
+    [area addSubview:toast];
+    self.previewToast = toast;
+
+    UIButton *fab = [UIButton buttonWithType:UIButtonTypeSystem];
+    fab.translatesAutoresizingMaskIntoConstraints = NO;
+    [fab setTitle:@"Q" forState:UIControlStateNormal];
+    fab.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    fab.layer.masksToBounds = YES;
+    [area addSubview:fab];
+    self.previewFab = fab;
+
+    self.previewFabWidth = [fab.widthAnchor constraintEqualToConstant:48];
+    self.previewFabHeight = [fab.heightAnchor constraintEqualToConstant:48];
+    self.previewPanelHeight = [panel.heightAnchor constraintEqualToConstant:104];
+    [NSLayoutConstraint activateConstraints:@[
+        [panel.topAnchor constraintEqualToAnchor:area.topAnchor constant:14],
+        [panel.leadingAnchor constraintEqualToAnchor:area.leadingAnchor constant:14],
+        [panel.trailingAnchor constraintEqualToAnchor:area.trailingAnchor constant:-14],
+        self.previewPanelHeight,
+        [panelTitle.topAnchor constraintEqualToAnchor:panel.topAnchor constant:10],
+        [panelTitle.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:12],
+        [panelTitle.trailingAnchor constraintLessThanOrEqualToAnchor:panel.trailingAnchor constant:-78],
+        [panelBody.topAnchor constraintEqualToAnchor:panelTitle.bottomAnchor constant:7],
+        [panelBody.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:12],
+        [panelBody.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-12],
+        [panelBody.bottomAnchor constraintLessThanOrEqualToAnchor:panel.bottomAnchor constant:-8],
+        [badge.topAnchor constraintEqualToAnchor:panel.topAnchor constant:8],
+        [badge.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-8],
+        [badge.widthAnchor constraintGreaterThanOrEqualToConstant:30],
+        [badge.heightAnchor constraintEqualToConstant:26],
+        [lowBadge.topAnchor constraintEqualToAnchor:panel.topAnchor constant:8],
+        [lowBadge.trailingAnchor constraintEqualToAnchor:badge.leadingAnchor constant:-6],
+        [lowBadge.widthAnchor constraintEqualToConstant:26],
+        [lowBadge.heightAnchor constraintEqualToConstant:26],
+        [toast.topAnchor constraintEqualToAnchor:panel.bottomAnchor constant:10],
+        [toast.leadingAnchor constraintEqualToAnchor:area.leadingAnchor constant:14],
+        [toast.trailingAnchor constraintEqualToAnchor:area.trailingAnchor constant:-82],
+        [toast.heightAnchor constraintEqualToConstant:28],
+        [fab.trailingAnchor constraintEqualToAnchor:area.trailingAnchor constant:-16],
+        [fab.bottomAnchor constraintEqualToAnchor:area.bottomAnchor constant:-14],
+        self.previewFabWidth,
+        self.previewFabHeight
+    ]];
+    [self updatePreview];
+}
+
+- (void)updatePreview {
+    if (!self.previewArea) return;
+    CGFloat fabSize = MIN(72, MAX(36, [self numberValue:@"fabSize" fallback:48]));
+    self.previewFabWidth.constant = fabSize;
+    self.previewFabHeight.constant = fabSize;
+    self.previewFab.layer.cornerRadius = fabSize / 2.0;
+    self.previewFab.backgroundColor = [QTColorFromHex([self stringValue:@"fabColor" fallback:@"#333333"]) colorWithAlphaComponent:[self numberValue:@"fabOpacity" fallback:0.8]];
+    [self.previewFab setTitleColor:[QTColorFromHex([self stringValue:@"fabIcon" fallback:@"#ffffff"]) colorWithAlphaComponent:[self numberValue:@"fabTextOpacity" fallback:1.0]] forState:UIControlStateNormal];
+
+    self.previewBadge.backgroundColor = [QTColorFromHex([self stringValue:@"badgeColor" fallback:@"#222222"]) colorWithAlphaComponent:[self numberValue:@"badgeOpacity" fallback:0.9]];
+    self.previewBadge.textColor = [QTColorFromHex([self stringValue:@"badgeText" fallback:@"#ffffff"]) colorWithAlphaComponent:[self numberValue:@"badgeTextOpacity" fallback:1.0]];
+    self.previewBadge.layer.cornerRadius = 6;
+    self.previewLowBadge.backgroundColor = [QTColorFromHex([self stringValue:@"lowColor" fallback:@"#8a5a00"]) colorWithAlphaComponent:[self numberValue:@"badgeOpacity" fallback:0.9]];
+    self.previewLowBadge.textColor = [QTColorFromHex([self stringValue:@"badgeText" fallback:@"#ffffff"]) colorWithAlphaComponent:[self numberValue:@"badgeTextOpacity" fallback:1.0]];
+
+    CGFloat panelRatio = MIN(0.85, MAX(0.35, [self numberValue:@"popHeight" fallback:0.60]));
+    self.previewPanelHeight.constant = 72.0 + ((panelRatio - 0.35) / 0.50) * 70.0;
+    self.previewPanel.backgroundColor = [QTColorFromHex([self stringValue:@"popColor" fallback:@"#ffffff"]) colorWithAlphaComponent:[self numberValue:@"popOpacity" fallback:0.97]];
+    self.previewPanel.layer.borderColor = [QTColorFromHex([self stringValue:@"popText" fallback:@"#000000"]) colorWithAlphaComponent:0.25].CGColor;
+    UIColor *panelText = [QTColorFromHex([self stringValue:@"popText" fallback:@"#000000"]) colorWithAlphaComponent:[self numberValue:@"popTextOpacity" fallback:1.0]];
+    self.previewPanelTitle.textColor = panelText;
+    self.previewPanelBody.textColor = panelText;
+
+    self.previewToast.backgroundColor = [QTColorFromHex([self stringValue:@"toastColor" fallback:@"#222222"]) colorWithAlphaComponent:[self numberValue:@"toastOpacity" fallback:0.9]];
+    self.previewToast.textColor = [QTColorFromHex([self stringValue:@"toastText" fallback:@"#ffffff"]) colorWithAlphaComponent:[self numberValue:@"toastTextOpacity" fallback:1.0]];
 }
 
 - (NSString *)stringValue:(NSString *)key fallback:(NSString *)fallback {
@@ -422,6 +606,7 @@ static NSString *QTHexFromColor(UIColor *color) {
     if (!self.activeColorKey) return;
     self.values[self.activeColorKey] = QTHexFromColor(viewController.selectedColor);
     [self updateColorButton:self.activeColorKey];
+    [self updatePreview];
 }
 
 - (void)addSliderRow:(NSString *)key title:(NSString *)title min:(CGFloat)min max:(CGFloat)max percent:(BOOL)percent {
@@ -471,6 +656,7 @@ static NSString *QTHexFromColor(UIColor *color) {
     self.values[key] = @(slider.value);
     BOOL percent = ![key isEqualToString:@"fabSize"];
     [self updateSliderLabel:key percent:percent];
+    [self updatePreview];
 }
 
 - (void)resetStyles {
@@ -481,23 +667,40 @@ static NSString *QTHexFromColor(UIColor *color) {
         slider.value = [self numberValue:key fallback:0.5];
         [self updateSliderLabel:key percent:![key isEqualToString:@"fabSize"]];
     }
+    [self updatePreview];
 }
 
 - (void)clearAPIKey {
-    QTSaveAPIKey(@"");
+    for (NSInteger index = 0; index <= 2; index++) QTSaveAPIKeyAtIndex(index, @"");
     self.hasSavedKey = NO;
+    self.hasSavedBackupKey1 = NO;
+    self.hasSavedBackupKey2 = NO;
     self.apiKeyField.text = @"";
-    self.apiKeyField.placeholder = @"Chưa có API key — nhập Gemini API key";
-    [self.webView evaluateJavaScript:@"window.__qtStorageSet({apiKey: ''});" completionHandler:nil];
+    self.backupKey1Field.text = @"";
+    self.backupKey2Field.text = @"";
+    self.apiKeyField.placeholder = @"Dán Gemini API key chính";
+    self.backupKey1Field.placeholder = @"Dán API key dự phòng 1 (không bắt buộc)";
+    self.backupKey2Field.placeholder = @"Dán API key dự phòng 2 (không bắt buộc)";
+    [self.webView evaluateJavaScript:@"window.__qtStorageSet({apiKey: '', backupApiKey1: '', backupApiKey2: ''});" completionHandler:nil];
 }
 
 - (void)saveSettings {
     NSString *newKey = [self.apiKeyField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
-    if (newKey.length) QTSaveAPIKey(newKey);
+    NSString *newBackup1 = [self.backupKey1Field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    NSString *newBackup2 = [self.backupKey2Field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    if (newKey.length) QTSaveAPIKeyAtIndex(0, newKey);
+    if (newBackup1.length) QTSaveAPIKeyAtIndex(1, newBackup1);
+    if (newBackup2.length) QTSaveAPIKeyAtIndex(2, newBackup2);
+    self.hasSavedKey = QTReadAPIKeyAtIndex(0).length > 0;
+    self.hasSavedBackupKey1 = QTReadAPIKeyAtIndex(1).length > 0;
+    self.hasSavedBackupKey2 = QTReadAPIKeyAtIndex(2).length > 0;
 
     NSMutableDictionary *values = [NSMutableDictionary dictionaryWithDictionary:self.values ?: @{}];
-    values[@"apiKey"] = (newKey.length || self.hasSavedKey) ? @"__qt_keychain__" : @"";
-    values[@"model"] = self.modelField.text.length ? self.modelField.text : @"gemini-3.5-flash-lite";
+    values[@"apiKey"] = self.hasSavedKey ? @"__qt_keychain__" : @"";
+    values[@"backupApiKey1"] = self.hasSavedBackupKey1 ? @"__qt_keychain__" : @"";
+    values[@"backupApiKey2"] = self.hasSavedBackupKey2 ? @"__qt_keychain__" : @"";
+    values[@"model"] = self.modelField.text.length ? [self.modelField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"gemini-3.5-flash-lite";
+    values[@"fallbackModel"] = [self.fallbackModelField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
     values[@"language"] = self.languageField.text.length ? self.languageField.text : @"Tiếng Việt";
     values[@"visionShot"] = @NO;
     for (NSString *key in self.sliders) values[key] = @(self.sliders[key].value);
@@ -520,7 +723,7 @@ static NSString *QTHexFromColor(UIColor *color) {
 @end
 
 @interface QTScriptBridge : NSObject <WKScriptMessageHandler>
-- (void)callGemini:(NSDictionary *)message config:(NSDictionary *)config webView:(WKWebView *)webView requestID:(id)requestID attempt:(NSInteger)attempt thinkingEnabled:(BOOL)thinkingEnabled;
+- (void)callGemini:(NSDictionary *)message config:(NSDictionary *)config webView:(WKWebView *)webView requestID:(id)requestID candidateIndex:(NSInteger)candidateIndex networkRetry:(NSInteger)networkRetry thinkingEnabled:(BOOL)thinkingEnabled;
 - (void)showSettingsForWebView:(WKWebView *)webView config:(NSDictionary *)config;
 @end
 
@@ -550,7 +753,7 @@ static NSString *QTHexFromColor(UIColor *color) {
         return;
     }
     if ([type isEqualToString:@"gemini"]) {
-        [self callGemini:payload config:config webView:webView requestID:requestID attempt:0 thinkingEnabled:YES];
+        [self callGemini:payload config:config webView:webView requestID:requestID candidateIndex:0 networkRetry:0 thinkingEnabled:YES];
         return;
     }
     if ([type isEqualToString:@"fetchImage"]) {
@@ -619,26 +822,51 @@ static NSString *QTHexFromColor(UIColor *color) {
     }];
 }
 
-- (void)callGemini:(NSDictionary *)message config:(NSDictionary *)config webView:(WKWebView *)webView requestID:(id)requestID attempt:(NSInteger)attempt thinkingEnabled:(BOOL)thinkingEnabled {
+- (void)callGemini:(NSDictionary *)message config:(NSDictionary *)config webView:(WKWebView *)webView requestID:(id)requestID candidateIndex:(NSInteger)candidateIndex networkRetry:(NSInteger)networkRetry thinkingEnabled:(BOOL)thinkingEnabled {
     if ([message[@"tools"] isEqualToString:@"code"]) {
         QTReply(webView, requestID, @{ @"ok": @NO, @"error": @"CODE_UNSUPPORTED: Python code execution is not included in this iOS port." });
         return;
     }
-    NSString *apiKey = QTReadAPIKey();
-    if (!apiKey.length) {
+
+    NSMutableArray<NSString *> *apiKeys = [QTReadAPIKeys() mutableCopy];
+    if (!QTReadAPIKeyAtIndex(0).length) {
         NSString *legacyKey = [config[@"apiKey"] isKindOfClass:[NSString class]] ? config[@"apiKey"] : @"";
         if (legacyKey.length && ![legacyKey isEqualToString:@"__qt_keychain__"]) {
-            apiKey = legacyKey;
-            QTSaveAPIKey(apiKey); // migrate once from the previous IndexedDB-backed prototype
+            QTSaveAPIKeyAtIndex(0, legacyKey);
+            apiKeys = [QTReadAPIKeys() mutableCopy];
         }
     }
-    if (!apiKey.length) {
+    if (!apiKeys.count) {
         QTReply(webView, requestID, @{ @"ok": @NO, @"error": @"Chưa có Gemini API key. Bấm Alt+bấm nút Q để mở Cài đặt." });
         return;
     }
-    NSString *model = [message[@"model"] isKindOfClass:[NSString class]] && [message[@"model"] length]
+
+    NSString *requestedModel = [message[@"model"] isKindOfClass:[NSString class]] && [message[@"model"] length]
         ? message[@"model"]
         : ([config[@"model"] isKindOfClass:[NSString class]] && [config[@"model"] length] ? config[@"model"] : @"gemini-3.5-flash-lite");
+    NSString *fallbackModel = [config[@"fallbackModel"] isKindOfClass:[NSString class]]
+        ? [config[@"fallbackModel"] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
+
+    NSMutableArray<NSString *> *models = [NSMutableArray arrayWithObject:requestedModel];
+    if (fallbackModel.length && ![fallbackModel isEqualToString:requestedModel]) [models addObject:fallbackModel];
+
+    // Candidate order: main model with primary/back-up keys, then fallback model with those keys.
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    for (NSString *candidateModel in models) {
+        for (NSUInteger keyIndex = 0; keyIndex < apiKeys.count; keyIndex++) {
+            [candidates addObject:@{ @"model": candidateModel, @"key": apiKeys[keyIndex], @"modelIndex": @([models indexOfObject:candidateModel]), @"keyIndex": @(keyIndex) }];
+        }
+    }
+    if (candidateIndex < 0 || candidateIndex >= (NSInteger)candidates.count) {
+        QTReply(webView, requestID, @{ @"ok": @NO, @"error": @"Đã thử hết API key và model dự phòng. Kiểm tra quota, quyền model và cấu hình API key." });
+        return;
+    }
+
+    NSDictionary *candidate = candidates[(NSUInteger)candidateIndex];
+    NSString *model = candidate[@"model"];
+    NSString *apiKey = candidate[@"key"];
+    NSInteger modelIndex = [candidate[@"modelIndex"] integerValue];
+    NSInteger keyIndex = [candidate[@"keyIndex"] integerValue];
     NSString *encodedModel = [model stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]] ?: model;
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://generativelanguage.googleapis.com/v1beta/models/%@:generateContent", encodedModel]];
     if (!url) {
@@ -654,8 +882,7 @@ static NSString *QTHexFromColor(UIColor *color) {
         @"responseSchema": QTResponseSchema(compact)
     } mutableCopy];
     NSString *thinking = [message[@"thinking"] isKindOfClass:[NSString class]] ? message[@"thinking"] : config[@"thinking"];
-    if (!thinking.length) thinking = @"minimal";
-    if ([thinking isEqualToString:@"auto"]) thinking = @"minimal";
+    if (![thinking isKindOfClass:[NSString class]] || !thinking.length || [thinking isEqualToString:@"auto"]) thinking = @"minimal";
     if (thinkingEnabled && ![thinking isEqualToString:@"off"]) generationConfig[@"thinkingConfig"] = @{ @"thinkingLevel": thinking };
 
     NSDictionary *body = @{
@@ -674,30 +901,98 @@ static NSString *QTHexFromColor(UIColor *color) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         NSString *raw = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
         if (networkError) {
-            if (attempt < 3) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * (attempt + 1))), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    [self callGemini:message config:config webView:webView requestID:requestID attempt:attempt + 1 thinkingEnabled:thinkingEnabled];
+            if (networkRetry < 1) {
+                QTNotifyStatus(webView, requestID, @"Kết nối Gemini bị gián đoạn; đang thử lại cùng cấu hình…");
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 1.5)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex networkRetry:networkRetry + 1 thinkingEnabled:thinkingEnabled];
+                });
+            } else if (candidateIndex + 1 < (NSInteger)candidates.count) {
+                QTNotifyStatus(webView, requestID, @"Mạng không ổn định; đang thử API key / model dự phòng…");
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 1.0)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex + 1 networkRetry:0 thinkingEnabled:thinkingEnabled];
                 });
             } else {
-                QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Lỗi mạng Gemini: %@", networkError.localizedDescription ?: @"không rõ"] });
+                QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Lỗi mạng Gemini sau khi thử các cấu hình dự phòng: %@", networkError.localizedDescription ?: @"không rõ"] });
             }
             return;
         }
+
         NSDictionary *decoded = data ? [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingFragmentsAllowed error:nil] : nil;
-        if (status == 400 && thinkingEnabled && [raw.lowercaseString containsString:@"think"]) {
-            [self callGemini:message config:config webView:webView requestID:requestID attempt:attempt thinkingEnabled:NO];
+        NSDictionary *errorObject = [decoded[@"error"] isKindOfClass:[NSDictionary class]] ? decoded[@"error"] : @{};
+        NSString *apiMessage = [errorObject[@"message"] isKindOfClass:[NSString class]] ? errorObject[@"message"] : @"";
+        NSString *apiStatus = [errorObject[@"status"] isKindOfClass:[NSString class]] ? errorObject[@"status"] : @"";
+        NSString *detailsText = @"";
+        if ([NSJSONSerialization isValidJSONObject:errorObject[@"details"]]) {
+            NSData *detailsData = [NSJSONSerialization dataWithJSONObject:errorObject[@"details"] options:0 error:nil];
+            if (detailsData) detailsText = [[NSString alloc] initWithData:detailsData encoding:NSUTF8StringEncoding] ?: @"";
+        }
+        NSString *lowerError = [[NSString stringWithFormat:@"%@ %@ %@", apiStatus, apiMessage, detailsText] lowercaseString];
+
+        if (status == 400 && thinkingEnabled && [lowerError containsString:@"think"]) {
+            [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex networkRetry:0 thinkingEnabled:NO];
             return;
         }
-        if ((status == 429 || status >= 500) && attempt < 3) {
-            NSTimeInterval delay = status == 429 ? 8.0 * (attempt + 1) : 2.0 * (attempt + 1);
+
+        BOOL highDemand = status == 503 || [lowerError containsString:@"high demand"] || [lowerError containsString:@"overloaded"] || [lowerError containsString:@"unavailable"] || [lowerError containsString:@"model_capacity_exhausted"] || [lowerError containsString:@"no capacity available for model"];
+        BOOL quotaLimited = status == 429 || [lowerError containsString:@"resource_exhausted"] || [lowerError containsString:@"quota"] || [lowerError containsString:@"rate limit"];
+        BOOL keyInvalid = (status == 400 || status == 403) && ([lowerError containsString:@"api_key_invalid"] || [lowerError containsString:@"api key not valid"] || [lowerError containsString:@"invalid api key"] || [lowerError containsString:@"api key is invalid"]);
+        BOOL modelUnavailable = status == 404 || ((status == 400 || status == 403) && ([lowerError containsString:@"model"] && ([lowerError containsString:@"not found"] || [lowerError containsString:@"not supported"] || [lowerError containsString:@"permission"] || [lowerError containsString:@"unsupported"])));
+        BOOL retryableServer = status >= 500;
+        NSInteger nextCandidate = candidateIndex + 1;
+
+        if (highDemand || modelUnavailable) {
+            // Capacity belongs to the model/service, not an API key. Try another model once,
+            // but don't burn backup keys against the same overloaded model.
+            if (modelIndex == 0 && models.count > 1) {
+                nextCandidate = (NSInteger)apiKeys.count; // fallback model + primary key
+            } else {
+                NSString *reason = highDemand
+                    ? [NSString stringWithFormat:@"Model %@ vẫn đang quá tải. Hãy đợi rồi thử lại hoặc chọn một model dự phòng khác.", model]
+                    : [NSString stringWithFormat:@"Model %@ không khả dụng với API key/project hiện tại. Hãy chọn model khác trong Cài đặt.", model];
+                QTReply(webView, requestID, @{ @"ok": @NO, @"error": reason });
+                return;
+            }
+        } else if (quotaLimited || keyInvalid || status == 403) {
+            // Quota / invalid-key errors may be recoverable with another independently
+            // entitled key. Candidate order then proceeds to the fallback model if needed.
+            nextCandidate = candidateIndex + 1;
+        } else if (retryableServer) {
+            if (networkRetry < 1) {
+                QTNotifyStatus(webView, requestID, [NSString stringWithFormat:@"Gemini trả HTTP %ld; đang thử lại sau một nhịp chờ…", (long)status]);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 2.0)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex networkRetry:networkRetry + 1 thinkingEnabled:thinkingEnabled];
+                });
+                return;
+            }
+            if (modelIndex == 0 && models.count > 1) {
+                nextCandidate = (NSInteger)apiKeys.count;
+            } else {
+                QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Gemini đang gặp lỗi máy chủ HTTP %ld. Hãy thử lại sau.", (long)status] });
+                return;
+            }
+        }
+
+        if (nextCandidate < (NSInteger)candidates.count && (quotaLimited || keyInvalid || status == 403 || highDemand || modelUnavailable || retryableServer)) {
+            NSString *nextModel = candidates[(NSUInteger)nextCandidate][@"model"];
+            NSInteger nextKey = [candidates[(NSUInteger)nextCandidate][@"keyIndex"] integerValue];
+            NSString *notice;
+            if (highDemand || modelUnavailable || [nextModel isEqualToString:fallbackModel]) {
+                notice = [NSString stringWithFormat:@"%@ không xử lý được request; chuyển sang model %@…", model, nextModel];
+            } else if (nextKey != keyIndex) {
+                notice = [NSString stringWithFormat:@"API key %ld đã chạm giới hạn / không hợp lệ; đang thử key dự phòng %ld…", (long)keyIndex + 1, (long)nextKey + 1];
+            } else {
+                notice = [NSString stringWithFormat:@"Gemini trả HTTP %ld; đang thử cấu hình dự phòng…", (long)status];
+            }
+            QTNotifyStatus(webView, requestID, notice);
+            NSTimeInterval delay = quotaLimited ? 1.0 : 0.5;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * delay)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                [self callGemini:message config:config webView:webView requestID:requestID attempt:attempt + 1 thinkingEnabled:thinkingEnabled];
+                [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:nextCandidate networkRetry:0 thinkingEnabled:thinkingEnabled];
             });
             return;
         }
+
         if (status < 200 || status >= 300) {
-            NSString *error = [decoded isKindOfClass:[NSDictionary class]] ? decoded[@"error"][@"message"] : nil;
-            if (![error isKindOfClass:[NSString class]] || !error.length) error = raw.length ? raw : [NSString stringWithFormat:@"HTTP %ld", (long)status];
+            NSString *error = apiMessage.length ? apiMessage : (raw.length ? raw : [NSString stringWithFormat:@"HTTP %ld", (long)status]);
             QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Gemini %ld (%@): %@", (long)status, model, error] });
             return;
         }

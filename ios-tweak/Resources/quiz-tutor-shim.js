@@ -106,14 +106,14 @@
 
   chromeCompat.runtime = chromeCompat.runtime || {};
   chromeCompat.runtime.lastError = null;
-  chromeCompat.runtime.getManifest = () => ({ version: '2.1.0-ios' });
+  chromeCompat.runtime.getManifest = () => ({ version: '2.3.0-ios' });
   chromeCompat.runtime.sendMessage = (message, callback) => {
     const id = String(++nextId);
     if (typeof callback === 'function') pending.set(id, callback);
     Promise.resolve().then(async () => {
       // Send only native settings; do not serialize the potentially large question cache.
       const config = await storageGet({
-        apiKey: '', model: 'gemini-3.5-flash-lite', language: 'Tiếng Việt', thinking: 'auto',
+        apiKey: '', backupApiKey1: '', backupApiKey2: '', model: 'gemini-3.5-flash-lite', fallbackModel: '', language: 'Tiếng Việt', thinking: 'auto',
         fabColor: '#333333', fabIcon: '#ffffff', fabOpacity: 0.8, fabTextOpacity: 1, fabSize: 48,
         badgeColor: '#222222', badgeText: '#ffffff', badgeOpacity: 0.9, badgeTextOpacity: 1, lowColor: '#8a5a00',
         popColor: '#ffffff', popText: '#000000', popOpacity: 0.97, popTextOpacity: 1, popHeight: 0.6,
@@ -136,6 +136,9 @@
     });
   };
 
+  window.__qtNativeStatus = (id, message) => {
+    window.dispatchEvent(new CustomEvent('qt-native-status', { detail: { id: String(id), message: String(message || '') } }));
+  };
   window.__qtNativeReply = (id, response) => {
     const key = String(id);
     const callback = pending.get(key);
