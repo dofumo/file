@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Quiz Tutor AI - Cài đặt</title>
+<style>
+  html{background:#fff}
+  body{font:14px/1.5 sans-serif;max-width:640px;margin:16px auto;padding:0 12px;background:#fff;color:#111}
+  fieldset{margin:0 0 14px}
+  label{display:block;margin:8px 0 2px}
+  label.chk{display:block}
+  input[type=text],input[type=password],select{width:100%}
+  small{display:block;color:#555}
+  .row{display:flex;align-items:center;gap:8px;margin:4px 0}
+  .row span.name{width:190px}
+  input,select,button{font-size:16px;min-height:36px}
+  input[type=checkbox]{min-height:0;width:20px;height:20px;vertical-align:middle}
+  button{padding:6px 14px}
+  @media (max-width:560px){.row{flex-wrap:wrap}.row span.name{width:100%}.row input[type=range]{min-width:60%}body{margin:8px auto}}
+  .row input[type=range]{flex:1}
+  .val{width:44px;text-align:right}
+  #preview{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px;background:#bbb;margin-top:8px}
+  .p-fab{width:40px;height:40px;border-radius:50%;text-align:center;font:700 14px/40px sans-serif;background:var(--fab-bg);color:var(--fab-fg)}
+  .p-badge{min-width:28px;height:24px;padding:0 8px;border-radius:4px;text-align:center;font:700 13px/24px sans-serif;background:var(--badge-bg);color:var(--badge-fg)}
+  .p-badge.low{background:var(--low-bg)}
+  .p-pop{padding:8px 10px;border-radius:4px;font:14px/1.5 sans-serif;background:var(--pop-bg);color:var(--pop-fg);border:1px solid var(--pop-bd)}
+  .p-toast{padding:6px 10px;border-radius:4px;font:13px/1.4 sans-serif;background:var(--toast-bg);color:var(--toast-fg)}
+</style>
+</head>
+<body>
+<h1>Quiz Tutor AI - Cài đặt</h1>
+
+<fieldset id="licBox">
+  <legend>Bản quyền</legend>
+  <p id="licStatus"></p>
+  <label for="devId">Mã thiết bị (gửi cho quản trị viên để nhận mã)</label>
+  <input id="devId" type="text" readonly>
+  <button id="copyDev" type="button">Sao chép mã thiết bị</button>
+  <label for="licCode">Mã kích hoạt / gia hạn</label>
+  <textarea id="licCode" rows="3" style="width:100%;font-family:monospace" placeholder="QT1-XXXXX-XXXXX-..."></textarea>
+  <button id="redeem" type="button">Kích hoạt / Gia hạn</button> <span id="licMsg"></span>
+</fieldset>
+
+<div id="main" hidden>
+<p><small>Điện thoại: chạm nút tròn để quét; chạm ô đáp án để xem lời giải; giữ nút nửa giây để ẩn/hiện; "Quét mới", "Cài đặt" và "Chẩn đoán" nằm cuối bảng lời giải.</small></p>
+
+<fieldset>
+  <legend>Kết nối Gemini</legend>
+  <label for="apiKey">API key</label>
+  <input id="apiKey" type="password" autocomplete="off" placeholder="AIza...">
+  <small>Lấy tại aistudio.google.com/apikey. Key chỉ lưu trong trình duyệt của bạn.</small>
+  <label for="model">Model</label>
+  <input id="model" type="text">
+  <label for="thinking">Mức suy luận lượt 1</label>
+  <select id="thinking">
+    <option value="auto">Tự động</option>
+    <option value="off">Tắt</option>
+    <option value="minimal">Minimal</option>
+    <option value="medium">Medium</option>
+    <option value="high">High</option>
+  </select>
+  <label for="parallel">Số request song song</label>
+  <select id="parallel">
+    <option value="1">1</option>
+    <option value="2">2</option>
+    <option value="3">3</option>
+  </select>
+  <label for="language">Ngôn ngữ giải thích</label>
+  <input id="language" type="text">
+  <label for="detail">Độ dài giải thích</label>
+  <select id="detail">
+    <option value="brief">Rất ngắn (ưu tiên đáp án đúng)</option>
+    <option value="short">Ngắn gọn</option>
+    <option value="detailed">Chi tiết</option>
+  </select>
+</fieldset>
+
+<fieldset>
+  <legend>Độ chính xác</legend>
+  <label class="chk"><input type="checkbox" id="accuracy"> Chế độ chính xác (giải lại câu rủi ro, bất đồng thì phân xử lần 3)</label>
+  <label class="chk"><input type="checkbox" id="useCode"> Cho Gemini chạy Python cho câu tính toán nhiều số liệu (mặc định TẮT: chậm hơn, chưa chắc đúng hơn; chỉ thử khi trang toán/lý nặng; tự bỏ qua nếu không hỗ trợ)</label>
+  <label class="chk"><input type="checkbox" id="sendImages"> Gửi ảnh trong đề cho Gemini</label>
+  <label class="chk"><input type="checkbox" id="deepSolve"> Bật lượt kiểm tra lại (lượt 2)</label>
+  <label for="refineScope">Câu nào được giải lại</label>
+  <select id="refineScope">
+    <option value="smart">Chỉ câu tính toán / có hình</option>
+    <option value="uncertain">Thêm câu AI chưa chắc</option>
+    <option value="all">Tất cả các câu</option>
+  </select>
+  <label for="strongModel">Model lượt 2</label>
+  <input id="strongModel" type="text">
+  <label for="strongThinking">Mức suy luận lượt 2</label>
+  <select id="strongThinking">
+    <option value="off">Tắt</option>
+    <option value="minimal">Minimal</option>
+    <option value="medium">Medium</option>
+    <option value="high">High</option>
+  </select>
+  <label class="chk"><input type="checkbox" id="visionShot"> Chụp ảnh từng câu gửi kèm ở lượt 2 (trang tự cuộn vài giây)</label>
+  <label class="chk"><input type="checkbox" id="debug"> Ghi log chẩn đoán vào Console (F12)</label>
+</fieldset>
+
+<fieldset>
+  <legend>Giao diện (độ trong suốt 0% = tàng hình hoàn toàn)</legend>
+
+  <b>Nút tròn</b>
+  <div class="row"><span class="name">Màu nền</span><input type="color" id="fabColor"></div>
+  <div class="row"><span class="name">Độ trong suốt nền</span><input type="range" id="fabOpacity" min="0" max="1" step="0.05"><span class="val" id="fabOpacityVal"></span></div>
+  <div class="row"><span class="name">Màu chữ</span><input type="color" id="fabIcon"></div>
+  <div class="row"><span class="name">Độ trong suốt chữ</span><input type="range" id="fabTextOpacity" min="0" max="1" step="0.05"><span class="val" id="fabTextOpacityVal"></span></div>
+
+  <b>Ô đáp án</b>
+  <div class="row"><span class="name">Màu nền</span><input type="color" id="badgeColor"></div>
+  <div class="row"><span class="name">Màu nền khi AI chưa chắc</span><input type="color" id="lowColor"></div>
+  <div class="row"><span class="name">Độ trong suốt nền</span><input type="range" id="badgeOpacity" min="0" max="1" step="0.05"><span class="val" id="badgeOpacityVal"></span></div>
+  <div class="row"><span class="name">Màu chữ</span><input type="color" id="badgeText"></div>
+  <div class="row"><span class="name">Độ trong suốt chữ</span><input type="range" id="badgeTextOpacity" min="0" max="1" step="0.05"><span class="val" id="badgeTextOpacityVal"></span></div>
+
+  <b>Bảng giải thích</b>
+  <div class="row"><span class="name">Màu nền</span><input type="color" id="popColor"></div>
+  <div class="row"><span class="name">Độ trong suốt nền</span><input type="range" id="popOpacity" min="0" max="1" step="0.05"><span class="val" id="popOpacityVal"></span></div>
+  <div class="row"><span class="name">Màu chữ</span><input type="color" id="popText"></div>
+  <div class="row"><span class="name">Độ trong suốt chữ</span><input type="range" id="popTextOpacity" min="0" max="1" step="0.05"><span class="val" id="popTextOpacityVal"></span></div>
+
+  <b>Thông báo</b>
+  <div class="row"><span class="name">Màu nền</span><input type="color" id="toastColor"></div>
+  <div class="row"><span class="name">Độ trong suốt nền</span><input type="range" id="toastOpacity" min="0" max="1" step="0.05"><span class="val" id="toastOpacityVal"></span></div>
+  <div class="row"><span class="name">Màu chữ</span><input type="color" id="toastText"></div>
+  <div class="row"><span class="name">Độ trong suốt chữ</span><input type="range" id="toastTextOpacity" min="0" max="1" step="0.05"><span class="val" id="toastTextOpacityVal"></span></div>
+
+  <div id="preview">
+    <div class="p-fab">Q</div>
+    <div class="p-badge">A</div>
+    <div class="p-badge">1, 3</div>
+    <div class="p-badge low">C</div>
+    <div class="p-pop">Bảng giải thích</div>
+    <div class="p-toast">Thông báo</div>
+  </div>
+  <button id="resetStyle" type="button">Khôi phục giao diện mặc định</button>
+</fieldset>
+
+<button id="save" type="button">Lưu cài đặt</button> <span id="st"></span>
+
+<h2>Cách dùng</h2>
+<ul>
+  <li>Bấm nút tròn: quét trang và hiện đáp án. Bấm lần nữa: ẩn/hiện các ô đáp án.</li>
+  <li>Bấm vào ô đáp án: xem lời giải.</li>
+  <li>Giữ nút khoảng nửa giây: ẩn hoàn toàn nút (vẫn bấm được tại vị trí cũ). Giữ lần nữa: hiện lại nút.</li>
+  <li>Chuột phải vào nút: quét mới. Alt + bấm: mở trang này. Ctrl + bấm: sao chép báo cáo chẩn đoán. Kéo nút để đổi vị trí.</li>
+</ul>
+</div>
+<script src="dev-mode.js"></script>
+<script src="license-config.js"></script>
+<script src="license.js"></script>
+<script src="options.js"></script>
+</body>
+</html>
