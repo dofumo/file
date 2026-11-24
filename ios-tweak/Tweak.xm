@@ -2,6 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <Security/Security.h>
+#import <math.h>
 #import "Generated/QTEmbeddedScripts.h"
 
 static const void *kQTInstalledKey = &kQTInstalledKey;
@@ -151,6 +152,373 @@ static NSArray *QTParseGeminiResponse(NSDictionary *json, NSString **errorText) 
     return nil;
 }
 
+
+static NSDictionary *QTUIStyleDefaults(void) {
+    return @{
+        @"fabColor": @"#333333", @"fabIcon": @"#ffffff", @"fabOpacity": @0.80, @"fabTextOpacity": @1.0,
+        @"fabSize": @48,
+        @"badgeColor": @"#222222", @"badgeText": @"#ffffff", @"badgeOpacity": @0.90, @"badgeTextOpacity": @1.0,
+        @"lowColor": @"#8a5a00",
+        @"popColor": @"#ffffff", @"popText": @"#000000", @"popOpacity": @0.97, @"popTextOpacity": @1.0,
+        @"popHeight": @0.60,
+        @"toastColor": @"#222222", @"toastText": @"#ffffff", @"toastOpacity": @0.90, @"toastTextOpacity": @1.0
+    };
+}
+
+static UIColor *QTColorFromHex(NSString *value) {
+    NSString *hex = [[value stringByReplacingOccurrencesOfString:@"#" withString:@""] uppercaseString];
+    if (hex.length != 6) return UIColor.systemBlueColor;
+    unsigned int rgb = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:hex];
+    if (![scanner scanHexInt:&rgb]) return UIColor.systemBlueColor;
+    return [UIColor colorWithRed:((rgb >> 16) & 0xFF) / 255.0
+                           green:((rgb >> 8) & 0xFF) / 255.0
+                            blue:(rgb & 0xFF) / 255.0 alpha:1.0];
+}
+
+static NSString *QTHexFromColor(UIColor *color) {
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return @"#333333";
+    return [NSString stringWithFormat:@"#%02X%02X%02X", (int)lrint(r * 255), (int)lrint(g * 255), (int)lrint(b * 255)];
+}
+
+@interface QTSettingsViewController : UIViewController <UIColorPickerViewControllerDelegate>
+@property (nonatomic, weak) WKWebView *webView;
+@property (nonatomic, copy) NSDictionary *initialConfig;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *values;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UIButton *> *colorButtons;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UISlider *> *sliders;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UILabel *> *sliderValues;
+@property (nonatomic, strong) UITextField *apiKeyField;
+@property (nonatomic, strong) UITextField *modelField;
+@property (nonatomic, strong) UITextField *languageField;
+@property (nonatomic, copy) NSString *activeColorKey;
+@property (nonatomic, strong) UIStackView *formStack;
+@property (nonatomic) BOOL hasSavedKey;
+- (instancetype)initWithWebView:(WKWebView *)webView config:(NSDictionary *)config;
+@end
+
+@implementation QTSettingsViewController
+
+- (instancetype)initWithWebView:(WKWebView *)webView config:(NSDictionary *)config {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _webView = webView;
+        _initialConfig = [config copy] ?: @{};
+        _values = [NSMutableDictionary dictionaryWithDictionary:QTUIStyleDefaults()];
+        [_values addEntriesFromDictionary:config ?: @{}];
+        _colorButtons = [NSMutableDictionary dictionary];
+        _sliders = [NSMutableDictionary dictionary];
+        _sliderValues = [NSMutableDictionary dictionary];
+        _hasSavedKey = QTReadAPIKey().length > 0;
+    }
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    self.title = @"Quiz Tutor AI";
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    [self.view addSubview:scroll];
+
+    self.formStack = [[UIStackView alloc] initWithFrame:CGRectZero];
+    self.formStack.axis = UILayoutConstraintAxisVertical;
+    self.formStack.spacing = 12;
+    self.formStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:self.formStack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.formStack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:16],
+        [self.formStack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:16],
+        [self.formStack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-16],
+        [self.formStack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
+        [self.formStack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-32]
+    ]];
+
+    UIStackView *header = [[UIStackView alloc] initWithFrame:CGRectZero];
+    header.axis = UILayoutConstraintAxisHorizontal;
+    header.alignment = UIStackViewAlignmentCenter;
+    header.distribution = UIStackViewDistributionFill;
+    UILabel *title = [UILabel new];
+    title.text = @"Giao diện & cài đặt";
+    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
+    title.adjustsFontForContentSizeCategory = YES;
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setTitle:@"Đóng" forState:UIControlStateNormal];
+    [close addTarget:self action:@selector(closeSettings) forControlEvents:UIControlEventTouchUpInside];
+    [header addArrangedSubview:title];
+    [header addArrangedSubview:[[UIView alloc] initWithFrame:CGRectZero]];
+    [header addArrangedSubview:close];
+    [self.formStack addArrangedSubview:header];
+
+    UILabel *subtitle = [UILabel new];
+    subtitle.text = @"Tùy chỉnh trực tiếp nút nổi, ô đáp án và bảng giải thích. Thay đổi được lưu vào cấu hình của Quiz Tutor trên thiết bị này.";
+    subtitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    subtitle.textColor = UIColor.secondaryLabelColor;
+    subtitle.numberOfLines = 0;
+    [self.formStack addArrangedSubview:subtitle];
+
+    [self addSection:@"Gemini"];
+    self.apiKeyField = [self addLabeledTextField:@"Gemini API key" placeholder:(self.hasSavedKey ? @"Đã lưu trong Keychain — nhập mới để thay thế" : @"Dán Gemini API key") secure:YES value:@""];
+    self.modelField = [self addLabeledTextField:@"Model" placeholder:@"gemini-3.5-flash-lite" secure:NO value:[self stringValue:@"model" fallback:@"gemini-3.5-flash-lite"]];
+    self.languageField = [self addLabeledTextField:@"Ngôn ngữ giải thích" placeholder:@"Tiếng Việt" secure:NO value:[self stringValue:@"language" fallback:@"Tiếng Việt"]];
+
+    [self addSection:@"Nút nổi"];
+    [self addColorRow:@"fabColor" title:@"Màu nền nút"];
+    [self addColorRow:@"fabIcon" title:@"Màu biểu tượng"];
+    [self addSliderRow:@"fabOpacity" title:@"Độ trong suốt nền" min:0 max:1 percent:YES];
+    [self addSliderRow:@"fabTextOpacity" title:@"Độ trong suốt biểu tượng" min:0 max:1 percent:YES];
+    [self addSliderRow:@"fabSize" title:@"Kích thước nút" min:36 max:72 percent:NO];
+
+    [self addSection:@"Ô đáp án"];
+    [self addColorRow:@"badgeColor" title:@"Màu nền đáp án"];
+    [self addColorRow:@"badgeText" title:@"Màu chữ đáp án"];
+    [self addColorRow:@"lowColor" title:@"Màu đáp án cần kiểm tra"];
+    [self addSliderRow:@"badgeOpacity" title:@"Độ trong suốt nền" min:0 max:1 percent:YES];
+    [self addSliderRow:@"badgeTextOpacity" title:@"Độ trong suốt chữ" min:0 max:1 percent:YES];
+
+    [self addSection:@"Bảng giải thích"];
+    [self addColorRow:@"popColor" title:@"Màu nền bảng"];
+    [self addColorRow:@"popText" title:@"Màu chữ bảng"];
+    [self addSliderRow:@"popOpacity" title:@"Độ trong suốt nền" min:0 max:1 percent:YES];
+    [self addSliderRow:@"popTextOpacity" title:@"Độ trong suốt chữ" min:0 max:1 percent:YES];
+    [self addSliderRow:@"popHeight" title:@"Chiều cao tối đa" min:0.35 max:0.85 percent:YES];
+
+    [self addSection:@"Thông báo"];
+    [self addColorRow:@"toastColor" title:@"Màu nền thông báo"];
+    [self addColorRow:@"toastText" title:@"Màu chữ thông báo"];
+    [self addSliderRow:@"toastOpacity" title:@"Độ trong suốt nền" min:0 max:1 percent:YES];
+    [self addSliderRow:@"toastTextOpacity" title:@"Độ trong suốt chữ" min:0 max:1 percent:YES];
+
+    UIButton *reset = [UIButton buttonWithType:UIButtonTypeSystem];
+    [reset setTitle:@"Khôi phục giao diện mặc định" forState:UIControlStateNormal];
+    reset.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    reset.layer.cornerRadius = 10;
+    reset.contentEdgeInsets = UIEdgeInsetsMake(12, 14, 12, 14);
+    [reset addTarget:self action:@selector(resetStyles) forControlEvents:UIControlEventTouchUpInside];
+    [self.formStack addArrangedSubview:reset];
+
+    UIButton *clearKey = [UIButton buttonWithType:UIButtonTypeSystem];
+    [clearKey setTitle:@"Xóa Gemini API key đã lưu" forState:UIControlStateNormal];
+    [clearKey setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
+    [clearKey addTarget:self action:@selector(clearAPIKey) forControlEvents:UIControlEventTouchUpInside];
+    [self.formStack addArrangedSubview:clearKey];
+
+    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
+    [save setTitle:@"Lưu cài đặt" forState:UIControlStateNormal];
+    [save setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    save.backgroundColor = UIColor.systemBlueColor;
+    save.layer.cornerRadius = 10;
+    save.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    save.contentEdgeInsets = UIEdgeInsetsMake(14, 18, 14, 18);
+    [save addTarget:self action:@selector(saveSettings) forControlEvents:UIControlEventTouchUpInside];
+    [self.formStack addArrangedSubview:save];
+}
+
+- (NSString *)stringValue:(NSString *)key fallback:(NSString *)fallback {
+    id value = self.values[key];
+    return [value isKindOfClass:[NSString class]] && [value length] ? value : fallback;
+}
+
+- (CGFloat)numberValue:(NSString *)key fallback:(CGFloat)fallback {
+    id value = self.values[key];
+    return [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : fallback;
+}
+
+- (void)addSection:(NSString *)title {
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    label.textColor = UIColor.labelColor;
+    label.accessibilityTraits = UIAccessibilityTraitHeader;
+    [self.formStack addArrangedSubview:label];
+    UIView *line = [UIView new];
+    line.backgroundColor = UIColor.separatorColor;
+    [line.heightAnchor constraintEqualToConstant:1 / UIScreen.mainScreen.scale].active = YES;
+    [self.formStack addArrangedSubview:line];
+}
+
+- (UITextField *)addLabeledTextField:(NSString *)labelText placeholder:(NSString *)placeholder secure:(BOOL)secure value:(NSString *)value {
+    UILabel *label = [UILabel new];
+    label.text = labelText;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    [self.formStack addArrangedSubview:label];
+
+    UITextField *field = [UITextField new];
+    field.borderStyle = UITextBorderStyleRoundedRect;
+    field.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    field.placeholder = placeholder;
+    field.text = value;
+    field.secureTextEntry = secure;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    field.returnKeyType = UIReturnKeyDone;
+    field.translatesAutoresizingMaskIntoConstraints = NO;
+    [field.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [self.formStack addArrangedSubview:field];
+    return field;
+}
+
+- (void)addColorRow:(NSString *)key title:(NSString *)title {
+    UIStackView *row = [[UIStackView alloc] initWithFrame:CGRectZero];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 12;
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    [row addArrangedSubview:label];
+    UIView *spacer = [UIView new];
+    [row addArrangedSubview:spacer];
+    UIButton *swatch = [UIButton buttonWithType:UIButtonTypeSystem];
+    swatch.layer.cornerRadius = 9;
+    swatch.layer.borderWidth = 1;
+    swatch.layer.borderColor = UIColor.separatorColor.CGColor;
+    [swatch.widthAnchor constraintEqualToConstant:62].active = YES;
+    [swatch.heightAnchor constraintEqualToConstant:34].active = YES;
+    swatch.accessibilityLabel = title;
+    swatch.accessibilityHint = @"Chọn màu";
+    swatch.accessibilityIdentifier = key;
+    [swatch addTarget:self action:@selector(chooseColor:) forControlEvents:UIControlEventTouchUpInside];
+    [row addArrangedSubview:swatch];
+    [self.formStack addArrangedSubview:row];
+    self.colorButtons[key] = swatch;
+    [self updateColorButton:key];
+}
+
+- (void)updateColorButton:(NSString *)key {
+    UIButton *button = self.colorButtons[key];
+    if (!button) return;
+    NSString *hex = [self stringValue:key fallback:@"#333333"];
+    button.backgroundColor = QTColorFromHex(hex);
+    [button setTitle:hex.uppercaseString forState:UIControlStateNormal];
+    UIColor *color = QTColorFromHex(hex);
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    [color getRed:&r green:&g blue:&b alpha:&a];
+    BOOL light = (r * 299 + g * 587 + b * 114) / 1000.0 > 0.58;
+    [button setTitleColor:(light ? UIColor.blackColor : UIColor.whiteColor) forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightSemibold];
+}
+
+- (void)chooseColor:(UIButton *)sender {
+    self.activeColorKey = sender.accessibilityIdentifier;
+    UIColorPickerViewController *picker = [UIColorPickerViewController new];
+    picker.delegate = self;
+    picker.selectedColor = QTColorFromHex([self stringValue:self.activeColorKey fallback:@"#333333"]);
+    picker.supportsAlpha = NO;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController {
+    if (!self.activeColorKey) return;
+    self.values[self.activeColorKey] = QTHexFromColor(viewController.selectedColor);
+    [self updateColorButton:self.activeColorKey];
+}
+
+- (void)addSliderRow:(NSString *)key title:(NSString *)title min:(CGFloat)min max:(CGFloat)max percent:(BOOL)percent {
+    UIStackView *container = [[UIStackView alloc] initWithFrame:CGRectZero];
+    container.axis = UILayoutConstraintAxisVertical;
+    container.spacing = 4;
+    UIStackView *top = [[UIStackView alloc] initWithFrame:CGRectZero];
+    top.axis = UILayoutConstraintAxisHorizontal;
+    top.alignment = UIStackViewAlignmentCenter;
+    UILabel *label = [UILabel new];
+    label.text = title;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    UILabel *valueLabel = [UILabel new];
+    valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+    valueLabel.textColor = UIColor.secondaryLabelColor;
+    valueLabel.textAlignment = NSTextAlignmentRight;
+    [valueLabel.widthAnchor constraintEqualToConstant:54].active = YES;
+    [top addArrangedSubview:label];
+    [top addArrangedSubview:[[UIView alloc] initWithFrame:CGRectZero]];
+    [top addArrangedSubview:valueLabel];
+    [container addArrangedSubview:top];
+
+    UISlider *slider = [UISlider new];
+    slider.minimumValue = min;
+    slider.maximumValue = max;
+    slider.value = MIN(max, MAX(min, [self numberValue:key fallback:(percent ? 0.8 : (min + max) / 2)]));
+    slider.accessibilityIdentifier = key;
+    [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [container addArrangedSubview:slider];
+    [self.formStack addArrangedSubview:container];
+    self.sliders[key] = slider;
+    self.sliderValues[key] = valueLabel;
+    [self updateSliderLabel:key percent:percent];
+}
+
+- (void)updateSliderLabel:(NSString *)key percent:(BOOL)percent {
+    UISlider *slider = self.sliders[key];
+    UILabel *label = self.sliderValues[key];
+    if (!slider || !label) return;
+    if (percent) label.text = [NSString stringWithFormat:@"%d%%", (int)lrint(slider.value * 100)];
+    else label.text = [NSString stringWithFormat:@"%d pt", (int)lrint(slider.value)];
+}
+
+- (void)sliderChanged:(UISlider *)slider {
+    NSString *key = slider.accessibilityIdentifier;
+    if (!key) return;
+    self.values[key] = @(slider.value);
+    BOOL percent = ![key isEqualToString:@"fabSize"];
+    [self updateSliderLabel:key percent:percent];
+}
+
+- (void)resetStyles {
+    [self.values addEntriesFromDictionary:QTUIStyleDefaults()];
+    for (NSString *key in self.colorButtons) [self updateColorButton:key];
+    for (NSString *key in self.sliders) {
+        UISlider *slider = self.sliders[key];
+        slider.value = [self numberValue:key fallback:0.5];
+        [self updateSliderLabel:key percent:![key isEqualToString:@"fabSize"]];
+    }
+}
+
+- (void)clearAPIKey {
+    QTSaveAPIKey(@"");
+    self.hasSavedKey = NO;
+    self.apiKeyField.text = @"";
+    self.apiKeyField.placeholder = @"Chưa có API key — nhập Gemini API key";
+    [self.webView evaluateJavaScript:@"window.__qtStorageSet({apiKey: ''});" completionHandler:nil];
+}
+
+- (void)saveSettings {
+    NSString *newKey = [self.apiKeyField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    if (newKey.length) QTSaveAPIKey(newKey);
+
+    NSMutableDictionary *values = [NSMutableDictionary dictionaryWithDictionary:self.values ?: @{}];
+    values[@"apiKey"] = (newKey.length || self.hasSavedKey) ? @"__qt_keychain__" : @"";
+    values[@"model"] = self.modelField.text.length ? self.modelField.text : @"gemini-3.5-flash-lite";
+    values[@"language"] = self.languageField.text.length ? self.languageField.text : @"Tiếng Việt";
+    values[@"visionShot"] = @NO;
+    for (NSString *key in self.sliders) values[key] = @(self.sliders[key].value);
+    for (NSString *key in self.colorButtons) if (![values[key] isKindOfClass:[NSString class]]) values[key] = QTUIStyleDefaults()[key];
+
+    WKWebView *webView = self.webView;
+    if (webView) {
+        NSString *script = [NSString stringWithFormat:@"window.__qtStorageSet(%@);", QTJSONString(values)];
+        [webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+            if (error) NSLog(@"[QuizTutor] Settings save bridge error: %@", error.localizedDescription);
+        }];
+    }
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)closeSettings {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
 @interface QTScriptBridge : NSObject <WKScriptMessageHandler>
 - (void)callGemini:(NSDictionary *)message config:(NSDictionary *)config webView:(WKWebView *)webView requestID:(id)requestID attempt:(NSInteger)attempt thinkingEnabled:(BOOL)thinkingEnabled;
 - (void)showSettingsForWebView:(WKWebView *)webView config:(NSDictionary *)config;
@@ -197,40 +565,14 @@ static NSArray *QTParseGeminiResponse(NSDictionary *json, NSString **errorText) 
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *controller = QTTopViewController(webView);
         if (!controller || controller.presentedViewController) return;
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Quiz Tutor AI – Cài đặt"
-                                                                       message:@"Nhập Gemini API key cá nhân. License key không được sử dụng trong bản iOS này."
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-            field.placeholder = @"Gemini API key";
-            field.secureTextEntry = YES;
-            NSString *savedKey = QTReadAPIKey();
-            NSString *legacyKey = [config[@"apiKey"] isKindOfClass:[NSString class]] ? config[@"apiKey"] : @"";
-            field.text = savedKey.length ? savedKey : ([legacyKey isEqualToString:@"__qt_keychain__"] ? @"" : legacyKey);
-            field.autocorrectionType = UITextAutocorrectionTypeNo;
-            field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        }];
-        [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-            field.placeholder = @"Model (ví dụ: gemini-3.5-flash-lite)";
-            field.text = [config[@"model"] isKindOfClass:[NSString class]] ? config[@"model"] : @"gemini-3.5-flash-lite";
-            field.autocorrectionType = UITextAutocorrectionTypeNo;
-            field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        }];
-        [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-            field.placeholder = @"Ngôn ngữ giải thích";
-            field.text = [config[@"language"] isKindOfClass:[NSString class]] ? config[@"language"] : @"Tiếng Việt";
-        }];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Lưu" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            NSString *key = alert.textFields[0].text ?: @"";
-            NSString *model = alert.textFields[1].text.length ? alert.textFields[1].text : @"gemini-3.5-flash-lite";
-            NSString *language = alert.textFields[2].text.length ? alert.textFields[2].text : @"Tiếng Việt";
-            QTSaveAPIKey(key);
-            // A non-secret marker lets content.js know a key exists; the actual key stays in Keychain.
-            NSDictionary *values = @{ @"apiKey": key.length ? @"__qt_keychain__" : @"", @"model": model, @"language": language, @"visionShot": @NO };
-            NSString *script = [NSString stringWithFormat:@"window.__qtStorageSet(%@);", QTJSONString(values)];
-            [webView evaluateJavaScript:script completionHandler:nil];
-        }]];
-        [controller presentViewController:alert animated:YES completion:nil];
+        QTSettingsViewController *settings = [[QTSettingsViewController alloc] initWithWebView:webView config:config];
+        settings.modalPresentationStyle = UIModalPresentationPageSheet;
+        if (@available(iOS 15.0, *)) {
+            settings.sheetPresentationController.detents = @[UISheetPresentationControllerDetent.largeDetent];
+            settings.sheetPresentationController.prefersGrabberVisible = YES;
+            settings.sheetPresentationController.preferredCornerRadius = 18.0;
+        }
+        [controller presentViewController:settings animated:YES completion:nil];
     });
 }
 

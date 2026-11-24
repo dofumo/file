@@ -112,7 +112,13 @@
     if (typeof callback === 'function') pending.set(id, callback);
     Promise.resolve().then(async () => {
       // Send only native settings; do not serialize the potentially large question cache.
-      const config = await storageGet({ apiKey: '', model: 'gemini-3.5-flash-lite', language: 'Tiếng Việt', thinking: 'auto' });
+      const config = await storageGet({
+        apiKey: '', model: 'gemini-3.5-flash-lite', language: 'Tiếng Việt', thinking: 'auto',
+        fabColor: '#333333', fabIcon: '#ffffff', fabOpacity: 0.8, fabTextOpacity: 1, fabSize: 48,
+        badgeColor: '#222222', badgeText: '#ffffff', badgeOpacity: 0.9, badgeTextOpacity: 1, lowColor: '#8a5a00',
+        popColor: '#ffffff', popText: '#000000', popOpacity: 0.97, popTextOpacity: 1, popHeight: 0.6,
+        toastColor: '#222222', toastText: '#ffffff', toastOpacity: 0.9, toastTextOpacity: 1
+      });
       const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.qtBridge;
       if (!bridge) {
         if (pending.has(id)) {
