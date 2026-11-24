@@ -8,6 +8,45 @@
 static const void *kQTInstalledKey = &kQTInstalledKey;
 static const void *kQTHandlerKey = &kQTHandlerKey;
 static NSString * const kQTTargetBundle = @"azt.azt";
+static NSString * const kQTStickyModelRouteDefaultsKey = @"com.dofumo.quiztutor.sticky-model-route";
+
+// When a model reports capacity/high-demand errors, pin its configured fallback
+// for subsequent requests. The preference remains until the user resets it or
+// changes the primary/fallback model pair in Settings.
+static NSDictionary *QTStickyModelRouteState(void) {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:kQTStickyModelRouteDefaultsKey];
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
+static NSString *QTStickyFallbackForModelPair(NSString *primaryModel, NSString *fallbackModel) {
+    if (!primaryModel.length || !fallbackModel.length) return nil;
+    NSDictionary *state = QTStickyModelRouteState();
+    if (![state isKindOfClass:[NSDictionary class]]) return nil;
+    if (![state[@"primary"] isEqualToString:primaryModel] || ![state[@"fallback"] isEqualToString:fallbackModel]) return nil;
+    NSString *selected = [state[@"selected"] isKindOfClass:[NSString class]] ? state[@"selected"] : nil;
+    return selected.length ? selected : nil;
+}
+
+static void QTPinFallbackForModelPair(NSString *primaryModel, NSString *fallbackModel, NSString *reason) {
+    if (!primaryModel.length || !fallbackModel.length || [primaryModel isEqualToString:fallbackModel]) return;
+    NSDictionary *state = @{
+        @"primary": primaryModel,
+        @"fallback": fallbackModel,
+        @"selected": fallbackModel,
+        @"reason": reason ?: @"high_demand",
+        @"changedAt": @([[NSDate date] timeIntervalSince1970])
+    };
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:state forKey:kQTStickyModelRouteDefaultsKey];
+    [defaults synchronize];
+    NSLog(@"[QuizTutor] Model %@ is pinned to %@ after high-demand response.", primaryModel, fallbackModel);
+}
+
+static void QTClearStickyModelRoute(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:kQTStickyModelRouteDefaultsKey];
+    [defaults synchronize];
+}
 
 static NSString *QTJSONString(id object) {
     if (!object) object = [NSNull null];
@@ -212,6 +251,7 @@ static NSString *QTHexFromColor(UIColor *color) {
 @property (nonatomic, strong) UITextField *apiKeyField;
 @property (nonatomic, strong) UITextField *modelField;
 @property (nonatomic, strong) UITextField *fallbackModelField;
+@property (nonatomic, strong) UILabel *modelRouteStatusLabel;
 @property (nonatomic, strong) UITextField *backupKey1Field;
 @property (nonatomic, strong) UITextField *backupKey2Field;
 @property (nonatomic, strong) UITextField *languageField;
@@ -312,13 +352,26 @@ static NSString *QTHexFromColor(UIColor *color) {
     self.backupKey1Field = [self addLabeledTextField:@"API key dự phòng 1" placeholder:(self.hasSavedBackupKey1 ? @"Đã lưu backup key 1 — nhập mới để thay thế" : @"Dán API key dự phòng 1 (không bắt buộc)") secure:YES value:@""];
     self.backupKey2Field = [self addLabeledTextField:@"API key dự phòng 2" placeholder:(self.hasSavedBackupKey2 ? @"Đã lưu backup key 2 — nhập mới để thay thế" : @"Dán API key dự phòng 2 (không bắt buộc)") secure:YES value:@""];
     self.modelField = [self addLabeledTextField:@"Model chính" placeholder:@"Model Gemini đang dùng" secure:NO value:[self stringValue:@"model" fallback:@"gemini-3.5-flash-lite"]];
-    self.fallbackModelField = [self addLabeledTextField:@"Model dự phòng khi quá tải" placeholder:@"Để trống để tắt model dự phòng" secure:NO value:[self stringValue:@"fallbackModel" fallback:@""]];
+    self.fallbackModelField = [self addLabeledTextField:@"Model dự phòng khi quá tải" placeholder:@"gemini-3.1-flash-lite" secure:NO value:[self stringValue:@"fallbackModel" fallback:@"gemini-3.1-flash-lite"]];
     UILabel *fallbackNote = [UILabel new];
-    fallbackNote.text = @"Quota / 429: thử API key tiếp theo. Model quá tải / 503 / high demand: chuyển sang model dự phòng. Backup key chỉ có ích khi có quyền và hạn mức độc lập; key cùng project có thể dùng chung quota.";
+    fallbackNote.text = @"Chỉ khi model trả high demand / capacity exhausted (thường HTTP 503), ứng dụng mới chuyển sang model dự phòng và ghim model đó cho mọi request tiếp theo, kể cả sau khi mở lại app. Quota / 429 hoặc lỗi API key chỉ thử key tiếp theo nhưng giữ nguyên model. Backup key cùng project có thể dùng chung quota.";
     fallbackNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
     fallbackNote.textColor = UIColor.secondaryLabelColor;
     fallbackNote.numberOfLines = 0;
     [self.formStack addArrangedSubview:fallbackNote];
+    self.modelRouteStatusLabel = [UILabel new];
+    self.modelRouteStatusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    self.modelRouteStatusLabel.textColor = UIColor.secondaryLabelColor;
+    self.modelRouteStatusLabel.numberOfLines = 0;
+    [self.formStack addArrangedSubview:self.modelRouteStatusLabel];
+    UIButton *resetModelRoute = [UIButton buttonWithType:UIButtonTypeSystem];
+    [resetModelRoute setTitle:@"Thử lại model chính (bỏ ghim dự phòng)" forState:UIControlStateNormal];
+    resetModelRoute.contentEdgeInsets = UIEdgeInsetsMake(8, 12, 8, 12);
+    resetModelRoute.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    resetModelRoute.layer.cornerRadius = 9;
+    [resetModelRoute addTarget:self action:@selector(resetStickyModelRoute) forControlEvents:UIControlEventTouchUpInside];
+    [self.formStack addArrangedSubview:resetModelRoute];
+    [self updateModelRouteStatus];
     self.languageField = [self addLabeledTextField:@"Ngôn ngữ giải thích" placeholder:@"Tiếng Việt" secure:NO value:[self stringValue:@"language" fallback:@"Tiếng Việt"]];
 
     [self addSection:@"Nút nổi"];
@@ -670,6 +723,28 @@ static NSString *QTHexFromColor(UIColor *color) {
     [self updatePreview];
 }
 
+- (void)updateModelRouteStatus {
+    if (!self.modelRouteStatusLabel) return;
+    NSString *primary = [self.modelField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSString *fallback = [self.fallbackModelField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!primary.length) primary = @"gemini-3.5-flash-lite";
+    NSString *pinned = QTStickyFallbackForModelPair(primary, fallback);
+    if (pinned.length) {
+        self.modelRouteStatusLabel.text = [NSString stringWithFormat:@"Đang ghim %@ cho mọi request tiếp theo vì %@ báo high demand. Trạng thái vẫn giữ sau khi đóng/mở ứng dụng; bấm nút bên dưới để thử lại model chính.", pinned, primary];
+        self.modelRouteStatusLabel.textColor = UIColor.systemOrangeColor;
+    } else {
+        self.modelRouteStatusLabel.text = @"Chưa ghim model dự phòng. Chỉ khi model chính trả về high demand / capacity exhausted, ứng dụng mới chuyển sang model dự phòng và giữ lựa chọn đó cho các request tiếp theo.";
+        self.modelRouteStatusLabel.textColor = UIColor.secondaryLabelColor;
+    }
+}
+
+- (void)resetStickyModelRoute {
+    QTClearStickyModelRoute();
+    [self updateModelRouteStatus];
+    self.modelRouteStatusLabel.text = @"Đã bỏ ghim. Request tiếp theo sẽ thử model chính trước.";
+    self.modelRouteStatusLabel.textColor = UIColor.systemGreenColor;
+}
+
 - (void)clearAPIKey {
     for (NSInteger index = 0; index <= 2; index++) QTSaveAPIKeyAtIndex(index, @"");
     self.hasSavedKey = NO;
@@ -702,6 +777,7 @@ static NSString *QTHexFromColor(UIColor *color) {
     values[@"model"] = self.modelField.text.length ? [self.modelField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"gemini-3.5-flash-lite";
     values[@"fallbackModel"] = [self.fallbackModelField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
     values[@"language"] = self.languageField.text.length ? self.languageField.text : @"Tiếng Việt";
+    [self updateModelRouteStatus];
     values[@"visionShot"] = @NO;
     for (NSString *key in self.sliders) values[key] = @(self.sliders[key].value);
     for (NSString *key in self.colorButtons) if (![values[key] isKindOfClass:[NSString class]]) values[key] = QTUIStyleDefaults()[key];
@@ -846,26 +922,26 @@ static NSString *QTHexFromColor(UIColor *color) {
         : ([config[@"model"] isKindOfClass:[NSString class]] && [config[@"model"] length] ? config[@"model"] : @"gemini-3.5-flash-lite");
     NSString *fallbackModel = [config[@"fallbackModel"] isKindOfClass:[NSString class]]
         ? [config[@"fallbackModel"] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
+    if (!fallbackModel.length) fallbackModel = @"gemini-3.1-flash-lite";
+    NSString *pinnedFallback = QTStickyFallbackForModelPair(requestedModel, fallbackModel);
+    BOOL isUsingPinnedFallback = pinnedFallback.length > 0;
+    NSString *effectiveModel = isUsingPinnedFallback ? pinnedFallback : requestedModel;
 
-    NSMutableArray<NSString *> *models = [NSMutableArray arrayWithObject:requestedModel];
-    if (fallbackModel.length && ![fallbackModel isEqualToString:requestedModel]) [models addObject:fallbackModel];
-
-    // Candidate order: main model with primary/back-up keys, then fallback model with those keys.
+    // A fallback model is NOT a generic error fallback. We only pin it after an
+    // explicit high-demand/capacity response from the primary model. Quota and
+    // invalid-key errors may rotate keys, but never silently change the model.
     NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
-    for (NSString *candidateModel in models) {
-        for (NSUInteger keyIndex = 0; keyIndex < apiKeys.count; keyIndex++) {
-            [candidates addObject:@{ @"model": candidateModel, @"key": apiKeys[keyIndex], @"modelIndex": @([models indexOfObject:candidateModel]), @"keyIndex": @(keyIndex) }];
-        }
+    for (NSUInteger keyIndex = 0; keyIndex < apiKeys.count; keyIndex++) {
+        [candidates addObject:@{ @"model": effectiveModel, @"key": apiKeys[keyIndex], @"keyIndex": @(keyIndex) }];
     }
     if (candidateIndex < 0 || candidateIndex >= (NSInteger)candidates.count) {
-        QTReply(webView, requestID, @{ @"ok": @NO, @"error": @"Đã thử hết API key và model dự phòng. Kiểm tra quota, quyền model và cấu hình API key." });
+        QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Đã thử hết API key cho model %@. Model không tự đổi trừ khi model chính báo high demand.", effectiveModel] });
         return;
     }
 
     NSDictionary *candidate = candidates[(NSUInteger)candidateIndex];
     NSString *model = candidate[@"model"];
     NSString *apiKey = candidate[@"key"];
-    NSInteger modelIndex = [candidate[@"modelIndex"] integerValue];
     NSInteger keyIndex = [candidate[@"keyIndex"] integerValue];
     NSString *encodedModel = [model stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]] ?: model;
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://generativelanguage.googleapis.com/v1beta/models/%@:generateContent", encodedModel]];
@@ -902,17 +978,17 @@ static NSString *QTHexFromColor(UIColor *color) {
         NSString *raw = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
         if (networkError) {
             if (networkRetry < 1) {
-                QTNotifyStatus(webView, requestID, @"Kết nối Gemini bị gián đoạn; đang thử lại cùng cấu hình…");
+                QTNotifyStatus(webView, requestID, @"Kết nối Gemini bị gián đoạn; đang thử lại cùng model và API key…");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 1.5)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex networkRetry:networkRetry + 1 thinkingEnabled:thinkingEnabled];
                 });
-            } else if (candidateIndex + 1 < (NSInteger)candidates.count) {
-                QTNotifyStatus(webView, requestID, @"Mạng không ổn định; đang thử API key / model dự phòng…");
+            } else if (keyIndex + 1 < apiKeys.count) {
+                QTNotifyStatus(webView, requestID, @"Kết nối lỗi với API key hiện tại; đang thử key tiếp theo nhưng giữ nguyên model…");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 1.0)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex + 1 networkRetry:0 thinkingEnabled:thinkingEnabled];
                 });
             } else {
-                QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Lỗi mạng Gemini sau khi thử các cấu hình dự phòng: %@", networkError.localizedDescription ?: @"không rõ"] });
+                QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Lỗi mạng Gemini với model %@: %@", model, networkError.localizedDescription ?: @"không rõ"] });
             }
             return;
         }
@@ -933,61 +1009,63 @@ static NSString *QTHexFromColor(UIColor *color) {
             return;
         }
 
-        BOOL highDemand = status == 503 || [lowerError containsString:@"high demand"] || [lowerError containsString:@"overloaded"] || [lowerError containsString:@"unavailable"] || [lowerError containsString:@"model_capacity_exhausted"] || [lowerError containsString:@"no capacity available for model"];
+        BOOL highDemand = status == 503 || [lowerError containsString:@"high demand"] || [lowerError containsString:@"overloaded"] || [lowerError containsString:@"model_capacity_exhausted"] || [lowerError containsString:@"no capacity available for model"];
         BOOL quotaLimited = status == 429 || [lowerError containsString:@"resource_exhausted"] || [lowerError containsString:@"quota"] || [lowerError containsString:@"rate limit"];
         BOOL keyInvalid = (status == 400 || status == 403) && ([lowerError containsString:@"api_key_invalid"] || [lowerError containsString:@"api key not valid"] || [lowerError containsString:@"invalid api key"] || [lowerError containsString:@"api key is invalid"]);
         BOOL modelUnavailable = status == 404 || ((status == 400 || status == 403) && ([lowerError containsString:@"model"] && ([lowerError containsString:@"not found"] || [lowerError containsString:@"not supported"] || [lowerError containsString:@"permission"] || [lowerError containsString:@"unsupported"])));
         BOOL retryableServer = status >= 500;
-        NSInteger nextCandidate = candidateIndex + 1;
 
-        if (highDemand || modelUnavailable) {
-            // Capacity belongs to the model/service, not an API key. Try another model once,
-            // but don't burn backup keys against the same overloaded model.
-            if (modelIndex == 0 && models.count > 1) {
-                nextCandidate = (NSInteger)apiKeys.count; // fallback model + primary key
-            } else {
-                NSString *reason = highDemand
-                    ? [NSString stringWithFormat:@"Model %@ vẫn đang quá tải. Hãy đợi rồi thử lại hoặc chọn một model dự phòng khác.", model]
-                    : [NSString stringWithFormat:@"Model %@ không khả dụng với API key/project hiện tại. Hãy chọn model khác trong Cài đặt.", model];
-                QTReply(webView, requestID, @{ @"ok": @NO, @"error": reason });
+        if (highDemand) {
+            // A high-demand response is model-level, not key-level. Pin the configured
+            // fallback persistently so every later chunk/request starts on that model.
+            if (!isUsingPinnedFallback && fallbackModel.length && ![fallbackModel isEqualToString:requestedModel]) {
+                QTPinFallbackForModelPair(requestedModel, fallbackModel, @"high_demand");
+                QTNotifyStatus(webView, requestID, [NSString stringWithFormat:@"%@ đang high demand; đã chuyển sang %@ và sẽ giữ model này cho các request tiếp theo.", model, fallbackModel]);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 0.5)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    // Re-enter from candidate zero; the sticky route makes fallbackModel
+                    // the sole active model for this and all subsequent requests.
+                    [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:0 networkRetry:0 thinkingEnabled:thinkingEnabled];
+                });
                 return;
             }
-        } else if (quotaLimited || keyInvalid || status == 403) {
-            // Quota / invalid-key errors may be recoverable with another independently
-            // entitled key. Candidate order then proceeds to the fallback model if needed.
-            nextCandidate = candidateIndex + 1;
-        } else if (retryableServer) {
+            NSString *reason = isUsingPinnedFallback
+                ? [NSString stringWithFormat:@"Model dự phòng %@ cũng đang high demand. Đã giữ nguyên model dự phòng; không tự quay lại %@.", model, requestedModel]
+                : [NSString stringWithFormat:@"Model %@ đang high demand nhưng chưa cấu hình model dự phòng. Hãy đặt Model dự phòng trong Cài đặt.", model];
+            QTReply(webView, requestID, @{ @"ok": @NO, @"error": reason });
+            return;
+        }
+
+        if (modelUnavailable) {
+            NSString *reason = [NSString stringWithFormat:@"Model %@ không khả dụng hoặc project không có quyền dùng model này (HTTP %ld). Không tự đổi model vì lỗi này không phải high demand.", model, (long)status];
+            QTReply(webView, requestID, @{ @"ok": @NO, @"error": reason });
+            return;
+        }
+
+        if (quotaLimited || keyInvalid || status == 403) {
+            // Rotate API keys only for key/quota/permission errors, and keep the same model.
+            if (keyIndex + 1 < apiKeys.count) {
+                QTNotifyStatus(webView, requestID, [NSString stringWithFormat:@"API key %ld bị giới hạn hoặc không có quyền; thử key dự phòng %ld (vẫn dùng %@)…", (long)keyIndex + 1, (long)keyIndex + 2, model]);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 1.0)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex + 1 networkRetry:0 thinkingEnabled:thinkingEnabled];
+                });
+                return;
+            }
+            NSString *reason = quotaLimited
+                ? [NSString stringWithFormat:@"Đã thử hết API key cho model %@ nhưng vẫn chạm quota/rate limit. Không tự chuyển model; hãy kiểm tra quota hoặc đặt lại key.", model]
+                : [NSString stringWithFormat:@"Các API key đã lưu không có quyền sử dụng model %@ hoặc bị từ chối (HTTP %ld). Không tự chuyển model.", model, (long)status];
+            QTReply(webView, requestID, @{ @"ok": @NO, @"error": reason });
+            return;
+        }
+
+        if (retryableServer) {
             if (networkRetry < 1) {
-                QTNotifyStatus(webView, requestID, [NSString stringWithFormat:@"Gemini trả HTTP %ld; đang thử lại sau một nhịp chờ…", (long)status]);
+                QTNotifyStatus(webView, requestID, [NSString stringWithFormat:@"Gemini trả HTTP %ld; đang thử lại cùng model %@…", (long)status, model]);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 2.0)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:candidateIndex networkRetry:networkRetry + 1 thinkingEnabled:thinkingEnabled];
                 });
                 return;
             }
-            if (modelIndex == 0 && models.count > 1) {
-                nextCandidate = (NSInteger)apiKeys.count;
-            } else {
-                QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Gemini đang gặp lỗi máy chủ HTTP %ld. Hãy thử lại sau.", (long)status] });
-                return;
-            }
-        }
-
-        if (nextCandidate < (NSInteger)candidates.count && (quotaLimited || keyInvalid || status == 403 || highDemand || modelUnavailable || retryableServer)) {
-            NSString *nextModel = candidates[(NSUInteger)nextCandidate][@"model"];
-            NSInteger nextKey = [candidates[(NSUInteger)nextCandidate][@"keyIndex"] integerValue];
-            NSString *notice;
-            if (highDemand || modelUnavailable || [nextModel isEqualToString:fallbackModel]) {
-                notice = [NSString stringWithFormat:@"%@ không xử lý được request; chuyển sang model %@…", model, nextModel];
-            } else if (nextKey != keyIndex) {
-                notice = [NSString stringWithFormat:@"API key %ld đã chạm giới hạn / không hợp lệ; đang thử key dự phòng %ld…", (long)keyIndex + 1, (long)nextKey + 1];
-            } else {
-                notice = [NSString stringWithFormat:@"Gemini trả HTTP %ld; đang thử cấu hình dự phòng…", (long)status];
-            }
-            QTNotifyStatus(webView, requestID, notice);
-            NSTimeInterval delay = quotaLimited ? 1.0 : 0.5;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * delay)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                [self callGemini:message config:config webView:webView requestID:requestID candidateIndex:nextCandidate networkRetry:0 thinkingEnabled:thinkingEnabled];
-            });
+            QTReply(webView, requestID, @{ @"ok": @NO, @"error": [NSString stringWithFormat:@"Gemini đang gặp lỗi máy chủ HTTP %ld khi dùng model %@. Không tự đổi model; hãy thử lại sau.", (long)status, model] });
             return;
         }
 
