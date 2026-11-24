@@ -1,0 +1,71 @@
+name: Build Quiz Tutor AI iOS tweak
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "content.js"
+      - "ios-tweak/**"
+      - ".github/workflows/build-ios.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare original extension script for WKWebView
+        run: |
+          python3 ios-tweak/scripts/prepare_content.py
+          node --check ios-tweak/Resources/quiz-tutor-shim.js
+          node --check ios-tweak/Resources/content.js
+
+      - name: Clone Theos and prepare SDK directories
+        run: |
+          git clone --recursive https://github.com/theos/theos "$GITHUB_WORKSPACE/theos"
+          mkdir -p "$GITHUB_WORKSPACE/theos/sdks" "$GITHUB_WORKSPACE/theos/toolchain"
+
+      - name: Install Theos and iOS SDKs
+        uses: Randomblock1/theos-action@v1
+        with:
+          # Must be absolute: the action changes directories while downloading SDKs.
+          theos-dir: ${{ github.workspace }}/theos
+          theos-src: https://github.com/theos/theos
+          theos-sdks: https://github.com/theos/sdks
+          theos-sdks-branch: master
+
+      - name: Build rootless package
+        working-directory: ios-tweak
+        run: make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+
+      - name: Collect Debian package, dylib, and resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p out
+          packages=(ios-tweak/packages/*.deb)
+          test "${#packages[@]}" -gt 0
+          cp "${packages[0]}" out/
+
+          extract_dir="$RUNNER_TEMP/qt-package"
+          mkdir -p "$extract_dir"
+          dpkg-deb -x "${packages[0]}" "$extract_dir"
+          find "$extract_dir" -type f -name 'AzotaQuizTutor.dylib' -exec cp {} out/ \;
+          bundle_path="$(find "$extract_dir" -type d -name 'AzotaQuizTutorResources.bundle' -print -quit)"
+          test -n "$bundle_path"
+          cp -a "$bundle_path" out/
+
+          test -f out/AzotaQuizTutor.dylib
+          test -d out/AzotaQuizTutorResources.bundle
+          ls -lah out
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuizTutorAI-iOS-rootless
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14

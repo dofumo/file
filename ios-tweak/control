@@ -1,0 +1,9 @@
+Package: com.dofumo.azota-quiz-tutor
+Name: Quiz Tutor AI
+Version: 2.1.0-1
+Architecture: iphoneos-arm64
+Description: Personal iOS WKWebView port of Quiz Tutor AI.
+Maintainer: dofumo
+Author: dofumo
+Section: Tweaks
+Depends: mobilesubstrate
