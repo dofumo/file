@@ -1,3 +1,4 @@
 .theos/
 packages/
 Resources/content.js
+Generated/QTEmbeddedScripts.h

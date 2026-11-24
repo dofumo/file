@@ -19,6 +19,7 @@ jobs:
       - name: Prepare original extension script for WKWebView
         run: |
           python3 ios-tweak/scripts/prepare_content.py
+          python3 ios-tweak/scripts/embed_resources.py
           node --check ios-tweak/Resources/quiz-tutor-shim.js
           node --check ios-tweak/Resources/content.js
 
@@ -40,7 +41,7 @@ jobs:
         working-directory: ios-tweak
         run: make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
-      - name: Collect Debian package, dylib, and resources
+      - name: Collect Debian package and standalone dylib
         shell: bash
         run: |
           set -euo pipefail
@@ -54,12 +55,7 @@ jobs:
           mkdir -p "$extract_dir"
           dpkg-deb -x "${packages[0]}" "$extract_dir"
           find "$extract_dir" -type f -name 'AzotaQuizTutor.dylib' -exec cp {} out/ \;
-          bundle_path="$(find "$extract_dir" -type d -name 'AzotaQuizTutorResources.bundle' -print -quit)"
-          test -n "$bundle_path"
-          cp -a "$bundle_path" out/
-
           test -f out/AzotaQuizTutor.dylib
-          test -d out/AzotaQuizTutorResources.bundle
           ls -lah out
 
       - name: Upload build artifacts

@@ -36,6 +36,13 @@ Chrome Extension APIs with IndexedDB storage and a native Objective-C message br
 - The Chrome options page is replaced by a small native settings dialog for Gemini API key, model,
   and explanation language. Other original defaults remain in `content.js`.
 
+## Single-file dylib
+
+The CI workflow runs `scripts/embed_resources.py` after preparing `Resources/content.js`. The script
+generates `Generated/QTEmbeddedScripts.h` containing both JavaScript assets as byte arrays. `Tweak.xm`
+reads these arrays from the compiled image. The generated header is ignored by Git and recreated on
+every CI build. The Theos Makefile builds only the tweak target; there is no resource-bundle target.
+
 ## Build with GitHub Actions
 
 The workflow is `.github/workflows/build-ios.yml`.
@@ -44,7 +51,7 @@ The workflow is `.github/workflows/build-ios.yml`.
 2. Add the `ios-tweak/` directory and `.github/workflows/build-ios.yml` to the repository.
 3. Push to `main`, or use **Actions → Build Quiz Tutor AI iOS tweak → Run workflow**.
 4. Download artifact `QuizTutorAI-iOS-rootless`.
-5. It contains the `.deb` package, `AzotaQuizTutor.dylib`, and the required `AzotaQuizTutorResources.bundle`. Keep the bundle next to the dylib if installing the raw dylib manually; the `.deb` installs both to the correct rootless location.
+5. It contains the `.deb` package and a standalone `AzotaQuizTutor.dylib`. Both JavaScript assets are embedded in the dylib during CI; no external resource bundle is required.
 
 The workflow uses an **absolute** `theos-dir` path. The Theos action changes its working directory while
 installing SDKs, so a relative `theos-dir` can cause `mv: theos/sdks is not a directory`.

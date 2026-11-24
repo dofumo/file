@@ -1,5 +1,6 @@
 Port target: Azota iOS app bundle ID azt.azt
 Web engine: WKWebView
-License: omitted in this personal iOS target
+License: omitted for this personal iOS target
 Gemini API key: required; stored in iOS Keychain, with only a non-secret marker in IndexedDB
 Screenshot capture: intentionally unsupported; DOM image fetch only
+Packaging: standalone AzotaQuizTutor.dylib; content.js and quiz-tutor-shim.js are embedded at build time

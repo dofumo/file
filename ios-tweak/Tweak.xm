@@ -2,10 +2,10 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <Security/Security.h>
+#import "Generated/QTEmbeddedScripts.h"
 
 static const void *kQTInstalledKey = &kQTInstalledKey;
 static const void *kQTHandlerKey = &kQTHandlerKey;
-static NSString * const kQTBundleName = @"AzotaQuizTutorResources";
 static NSString * const kQTTargetBundle = @"azt.azt";
 
 static NSString *QTJSONString(id object) {
@@ -15,23 +15,20 @@ static NSString *QTJSONString(id object) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"null";
 }
 
-static NSBundle *QTResourceBundle(void) {
-    NSArray<NSString *> *paths = @[
-        @"/var/jb/Library/MobileSubstrate/DynamicLibraries/AzotaQuizTutorResources.bundle",
-        @"/Library/MobileSubstrate/DynamicLibraries/AzotaQuizTutorResources.bundle"
-    ];
-    for (NSString *path in paths) {
-        NSBundle *bundle = [NSBundle bundleWithPath:path];
-        if (bundle) return bundle;
+// The two JavaScript assets are generated into this header during the CI build.
+// Their bytes become part of this dylib, so no external .bundle is required.
+static NSString *QTLoadResource(NSString *name) {
+    if ([name isEqualToString:@"quiz-tutor-shim"]) {
+        return [[NSString alloc] initWithBytes:QTShimJS
+                                        length:sizeof(QTShimJS)
+                                      encoding:NSUTF8StringEncoding];
+    }
+    if ([name isEqualToString:@"content"]) {
+        return [[NSString alloc] initWithBytes:QTContentJS
+                                        length:sizeof(QTContentJS)
+                                      encoding:NSUTF8StringEncoding];
     }
     return nil;
-}
-
-static NSString *QTLoadResource(NSString *name) {
-    NSBundle *bundle = QTResourceBundle();
-    NSString *path = [bundle pathForResource:name ofType:@"js"];
-    if (!path) return nil;
-    return [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
 }
 
 static BOOL QTIsAzotaHost(NSURL *url) {
@@ -380,7 +377,7 @@ static void QTInstallScripts(WKWebViewConfiguration *configuration) {
     NSString *shim = QTLoadResource(@"quiz-tutor-shim");
     NSString *content = QTLoadResource(@"content");
     if (!shim.length || !content.length) {
-        NSLog(@"[QuizTutor] Missing JS resources in %@.", kQTBundleName);
+        NSLog(@"[QuizTutor] Embedded JavaScript resources are missing or invalid.");
         return;
     }
 
